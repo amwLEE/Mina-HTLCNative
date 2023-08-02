@@ -291,8 +291,8 @@ export default function Home() {
           Write Contract
         </div>
         <ButtonRow buttonName="newContract" onClick={onSendTransaction} inputFields={[{ type: 'text', placeholder: 'receiver' }, { type: 'number', placeholder: 'hashlock' }, { type: 'number', placeholder: 'timelock' }]} />
-        <ButtonRow buttonName="refund" onClick={onSendTransaction} inputFields={[{ type: 'number', placeholder: 'contractId' }, { type: 'number', placeholder: 'preimage' }]} />
-        <ButtonRow buttonName="withdraw" onClick={onSendTransaction} inputFields={[{ type: 'number', placeholder: 'contractId' }]} />
+        <ButtonRow buttonName="withdraw" onClick={onSendTransaction} inputFields={[{ type: 'number', placeholder: 'contractId' }, { type: 'number', placeholder: 'preimage' }]} />
+        <ButtonRow buttonName="refund" onClick={onSendTransaction} inputFields={[{ type: 'number', placeholder: 'contractId' }]} />
         <div style={{ height: '3rem' }}></div>
       </div>
     );
