@@ -16,24 +16,24 @@ import {
   } from 'snarkyjs';
   
   /**
-   * Single Field secret can fit 4x UInt64, since it can store 256bits
-   * TODO: wrap secret verification and reveal in a separate contract/proof
+   * Single Field preimage can fit 4x UInt64, since it can store 256bits
+   * TODO: wrap preimage verification and reveal in a separate contract/proof
    * in order to workaround the contract storage limits
    */
   export class Secret extends CircuitValue {
     @arrayProp(Field, 1) value: Field[];
   
-    // pattern to allow expanding the secret to contain 4xUInt64
+    // pattern to allow expanding the preimage to contain 4xUInt64
     static fromUInt64(a: UInt64): Secret {
-      const secret = new Secret();
+      const preimage = new Secret();
       // UInt64.toFields() gives us a single field in an array
-      // once we add more than 1xUInt64 to the secret, we will handle the composition into arrayProp here
-      secret.value = a.toFields();
-      return secret;
+      // once we add more than 1xUInt64 to the preimage, we will handle the composition into arrayProp here
+      preimage.value = a.toFields();
+      return preimage;
     }
   }
   
-  interface HTLCPoseidonConcrete {
+  interface IHTLCNative {
     // mutations which need @method
     newContract(
       receiver: PublicKey,
@@ -78,81 +78,113 @@ import {
   /**
    * Hash time lock contract using the Poseidon hashing function
    */
-  export abstract class HTLCPoseidon extends SmartContract implements HTLCPoseidonConcrete {
+  export class HTLCNative extends SmartContract implements IHTLCNative {
     // 2 fields
     @state(PublicKey)
     refundTo: State<PublicKey> = State<PublicKey>();
     // 2 fields
     @state(PublicKey)
-    recipient: State<PublicKey> = State<PublicKey>();
+    receiver: State<PublicKey> = State<PublicKey>();
     // 1 field
     @state(Field)
     hashlock: State<Field> = State<Field>();
     // 1 field
     @state(UInt64)
-    expireAt: State<UInt64> = State<UInt64>();
+    timelock: State<UInt64> = State<UInt64>();
+    @state(Bool)
+    withdrawn: State<Bool> = State<Bool>();
+    @state(Bool)
+    refunded: State<Bool> = State<Bool>();
   
     /**
-     * Expose secret through the storage, as it needs to be visible to the
+     * Expose preimage through the storage, as it needs to be visible to the
      * second party in case the HTLC is used for an atomic swap.
      *
-     * // TODO: replace with 'releasing' the secret via events, to free up contract on-chain storage
+     * // TODO: replace with 'releasing' the preimage via events, to free up contract on-chain storage
      *
      * IMPORTANT: This only happens at release time, never at lock time.
      */
     @state(Secret)
-    secret: State<Secret> = State<Secret>();
-  
-    assertExpiresAtSufficientFuture(expireAt: UInt64) {
+    preimage: State<Secret> = State<Secret>();
+    
+    modifierFundsSent(amount: UInt64) {
+      amount.assertGreaterThan(UInt64.from(0), "amount must be > 0");
+    }
+
+    modifierFutureTimelock(time: UInt64) {
       const timestamp = this.network.timestamp.get();
       this.network.timestamp.assertEquals(timestamp);
-      // assert that expiresAt is at least 3 days in the future
-      // TODO: should we use absolute value for expireAt, or relative to timestamp?
-      // e.g. expireAt = timestamp+expireAt
-      
-      const oneDay = UInt64.from(86400000);
-      const expireSubThreeDays =
-      Array(3)
-        .fill(null)
-        .reduce((expireAt) => {
-          return expireAt.sub(oneDay);
-        }, expireAt);
-      //const expireSubThreeDays = subDays(expireAt, 3);
-      expireSubThreeDays.assertGreaterThan(timestamp);
+      time.assertGreaterThan(timestamp, "timelock time must be in the future");
     }
-  
-    assertDepositAmountNotZero(amount: UInt64) {
-      amount.assertGreaterThan(UInt64.from(0));
+
+    modifierContractExists(contractId: Field) {
+      this.haveContract(contractId).assertTrue("contractId does not exist");
+    }
+
+    modifierHashlockMatches(contractId: Field, preimage: Secret) {
+      // check if the preimage results into an identical hash
+      const currentHashlock = this.hashlock.get();
+      // precondition asserting data consistency between proving and verification
+      this.hashlock.assertEquals(currentHashlock);
+      const expectedHashlock = Poseidon.hash(preimage.value);
+      // assert if the provided preimage matches the preimage used to create the original hashlock
+      currentHashlock.assertEquals(expectedHashlock); // "hashlock hash does not match"
+    }
+
+    modifierWithdrawable(contractId: Field) {
+      const refundTo = this.refundTo.get();
+      this.refundTo.assertEquals(refundTo);
+      refundTo.assertEquals(this.sender); // "refundable: already refunded"
+
+      const withdrawn = this.withdrawn.get();
+      this.withdrawn.assertEquals(withdrawn);
+      withdrawn.assertFalse("refundable: already withdrawn");
+
+      const timelock = this.timelock.get();
+      this.timelock.assertEquals(timelock);
+      const timestamp = this.network.timestamp.get();
+      this.network.timestamp.assertEquals(timestamp);
+      timelock.assertLessThanOrEqual(timestamp, "refundable: timelock not yet passed");
+    }
+
+    modifierRefundable(contractId: Field) {
+      const refundTo = this.refundTo.get();
+      this.refundTo.assertEquals(refundTo);
+      refundTo.assertEquals(this.sender); // "refundable: already refunded"
+
+      const refunded = this.refunded.get();
+      this.refunded.assertEquals(refunded);
+      refunded.assertFalse("refundable: already refunded");
+
+      const withdrawn = this.withdrawn.get();
+      this.withdrawn.assertEquals(withdrawn);
+      withdrawn.assertFalse("refundable: already withdrawn");
+
+      const timelock = this.timelock.get();
+      this.timelock.assertEquals(timelock);
+      const timestamp = this.network.timestamp.get();
+      this.network.timestamp.assertEquals(timestamp);
+      timelock.assertLessThanOrEqual(timestamp, "refundable: timelock not yet passed");
     }
   
     assertIsNew() {
-      const recipient = this.recipient.get();
-      this.recipient.assertEquals(recipient);
-      // there is no recipient yet
-      recipient.isEmpty().assertTrue();
+      const receiver = this.receiver.get();
+      this.receiver.assertEquals(receiver);
+      // there is no receiver yet
+      receiver.isEmpty().assertTrue();
     }
   
     assertIsNotNew() {
-      const recipient = this.recipient.get();
-      this.recipient.assertEquals(recipient);
-      // there is no recipient yet
-      recipient.isEmpty().assertFalse();
-    }
-  
-    assertIsExpired() {
-      const timestamp = this.network.timestamp.get();
-      this.network.timestamp.assertEquals(timestamp);
-      const expireAt = this.expireAt.get();
-      this.expireAt.assertEquals(expireAt);
-  
-      // TODO: should we use assertLessThan instead?
-      expireAt.assertLessThanOrEqual(timestamp);
+      const receiver = this.receiver.get();
+      this.receiver.assertEquals(receiver);
+      // there is no receiver yet
+      receiver.isEmpty().assertFalse();
     }
   
     getRecipient() {
-      const recipient = this.recipient.get();
-      this.recipient.assertEquals(recipient);
-      return recipient;
+      const receiver = this.receiver.get();
+      this.receiver.assertEquals(receiver);
+      return receiver;
     }
   
     getRefundTo() {
@@ -165,26 +197,16 @@ import {
       this.hashlock.set(hashlock);
     }
   
-    setRecipient(recipient: PublicKey) {
-      this.recipient.set(recipient);
+    setRecipient(receiver: PublicKey) {
+      this.receiver.set(receiver);
     }
   
     setRefundTo(refundTo: PublicKey) {
       this.refundTo.set(refundTo);
     }
   
-    setSecret(secret: Secret) {
-      this.secret.set(secret);
-    }
-  
-    assertSecretHashEqualsHashlock(secret: Secret) {
-      // check if the secret results into an identical hash
-      const currentHashlock = this.hashlock.get();
-      // precondition asserting data consistency between proving and verification
-      this.hashlock.assertEquals(currentHashlock);
-      const expectedHashlock = Poseidon.hash(secret.value);
-      // assert if the provided secret matches the secret used to create the original hashlock
-      currentHashlock.assertEquals(expectedHashlock);
+    setSecret(preimage: Secret) {
+      this.preimage.set(preimage);
     }
   
     @method newContract(
@@ -197,8 +219,7 @@ import {
       // Circuit.log(this.tokenId);
       // verify preconditions
       this.assertIsNew();
-      this.assertExpiresAtSufficientFuture(timelock);
-      this.assertDepositAmountNotZero(amount);
+      this.modifierFundsSent(amount);
       // update state
       this.setRefundTo(this.sender);
       this.setRecipient(receiver);
@@ -226,27 +247,27 @@ import {
       // verify preconditions
       // TODO: actually check the state, not just the nonce
       this.assertIsNotNew();
-      this.assertSecretHashEqualsHashlock(preimage);
+      this.modifierHashlockMatches(contractId, preimage);
   
       this.setSecret(preimage);
   
-      const recipient = this.getRecipient();
-      // TODO: implement a check for signature of the recipient, disallowing call of 'unlock' without 'being' the recipient
+      const receiver = this.getRecipient();
+      // TODO: implement a check for signature of the receiver, disallowing call of 'unlock' without 'being' the receiver
       // this doesnt work for custom tokens, but it works fine for the native token (no token id)
       const accountUpdateRecipient = AccountUpdate.create(
-        recipient,
+        receiver,
         this.tokenId
       );
   
       accountUpdateRecipient.requireSignature();
   
-      // transfer from the contract to the recipient
+      // transfer from the contract to the receiver
       const currentBalance = this.account.balance.get();
       // assert balance is equal at time of execution
       this.account.balance.assertEquals(currentBalance);
       // empty out the contract completely
       this.send({
-        to: recipient,
+        to: receiver,
         amount: currentBalance,
       });
       this.emitEvent('LogHTLCWithdraw', { contractId });
@@ -254,7 +275,9 @@ import {
     }
   
     @method refund(contractId: Field): Bool {
-      this.assertIsExpired();
+      const timelock = this.timelock.get();
+      this.timelock.assertEquals(timelock);
+      this.modifierFutureTimelock(timelock);
   
       const refundTo = this.getRefundTo();
       const currentBalance = this.account.balance.get();
